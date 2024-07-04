@@ -38,19 +38,15 @@ namespace WinUiTest
 
         private void myButton_Click(object sender, RoutedEventArgs e)
         {
-            var appDataPath = UserDataPaths.GetDefault().LocalAppData;
+            var s = new StringBuilder();
 
-            const string googleDriveRegKeyName = @"Software\Google\DriveFS";
+            // Sqlite approach to getting the mount paths.
 
-            const string googleDriveRegValueName = "PerAccountPreferences";
+            s.AppendLine("PATHS FROM SQLITE DATABASE\n");
 
-            using var googleDriveRegKey = Registry.CurrentUser.OpenSubKey(googleDriveRegKeyName);
+            var localAppDataPath = UserDataPaths.GetDefault().LocalAppData;
 
-            var googleDriveRegValue = googleDriveRegKey?.GetValue(googleDriveRegValueName);
-
-            var googleDriveRegValueJson = JsonDocument.Parse(googleDriveRegValue as string ?? "");
-
-            var syncDbPath = GetDbPath(appDataPath);
+            var syncDbPath = GetDbPath(localAppDataPath);
 
             SQLitePCL.Batteries_V2.Init();
             using var database = new SqliteConnection($"Data Source='{syncDbPath}'");
@@ -60,23 +56,30 @@ namespace WinUiTest
                 database
             );
 
-            var s = new StringBuilder();
-
             database.Open();
 
-            var reader = cmdRoot.ExecuteReader();
-            while (reader.Read())
-            {
-                s.AppendLine("hi");
-            }
+            TraverseDbResponses(cmdRoot, cmdMedia, s);
 
-            s.AppendLine("LocalAppData: " + appDataPath);
-            s.AppendLine("google drive reg val: " + googleDriveRegValue);
+            // Registry approach to getting the mount paths.
+
+            s.AppendLine("\nPATHS FROM REGISTRY\n");
+
+            var googleDriveRegValueJson = GetGoogleDriveRegValueJson(out var googleDriveRegValue);
+
             s.AppendLine(
-                "google drive reg val json: "
-                    + googleDriveRegValueJson.RootElement.EnumerateObject().Count()
+                string.Join(
+                    ", ",
+                    googleDriveRegValueJson
+                        ?.RootElement
+                        .EnumerateObject()
+                        .FirstOrDefault()
+                        .Value.EnumerateArray()
+                        .Select(item => item.GetProperty("value").GetProperty("mount_point_path"))
+                        ?? []
+                )
             );
-            s.AppendLine("syncDbPath: " + syncDbPath);
+
+            s.AppendLine("\nRAW GOOGLE DRIVE REGISTRY VALUE\n\n" + googleDriveRegValue);
 
             myButton.Content = s;
         }
@@ -89,6 +92,60 @@ namespace WinUiTest
                 )
                 .AsTask()
                 .Result.Path;
+        }
+
+        private JsonDocument? GetGoogleDriveRegValueJson(out object? googleDriveRegValue)
+        {
+            const string googleDriveRegKeyName = @"Software\Google\DriveFS";
+
+            const string googleDriveRegValueName = "PerAccountPreferences";
+
+            using var googleDriveRegKey = Registry.CurrentUser.OpenSubKey(googleDriveRegKeyName);
+
+            googleDriveRegValue = googleDriveRegKey?.GetValue(googleDriveRegValueName);
+
+            JsonDocument? googleDriveRegValueJson = null;
+            try
+            {
+                googleDriveRegValueJson = JsonDocument.Parse(googleDriveRegValue as string ?? "");
+            }
+            catch (JsonException je) { }
+
+            return googleDriveRegValueJson;
+        }
+
+        private void TraverseDbResponses(
+            SqliteCommand? cmdRoot,
+            SqliteCommand? cmdMedia,
+            StringBuilder s
+        )
+        {
+            var i = 0;
+            var reader = cmdRoot?.ExecuteReader();
+            while (reader?.Read() ?? false)
+            {
+                var path = reader["last_seen_absolute_path"].ToString();
+                if (string.IsNullOrWhiteSpace(path))
+                    continue;
+                i++;
+                s.AppendLine("cmdRoot read: " + path);
+            }
+
+            reader = cmdMedia?.ExecuteReader();
+
+            while (reader?.Read() ?? false)
+            {
+                var path = reader["last_mount_point"].ToString();
+                if (string.IsNullOrWhiteSpace(path))
+                    continue;
+                i++;
+                s.AppendLine("cmdMedia read: " + path);
+            }
+
+            if (i == 0)
+            {
+                s.AppendLine("<none>");
+            }
         }
     }
 }
